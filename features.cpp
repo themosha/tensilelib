@@ -893,11 +893,11 @@ public:
     }
 };
 
-class SubSelect : public ISQLFeature {
+class SubSelectFrom : public ISQLFeature {
 public:
-    explicit SubSelect() {}
+    explicit SubSelectFrom() {}
 
-    std::string name() override { return "subselect chain"; }
+    std::string name() override { return "subselect in FROM "; }
 
     std::string GenerateSQL(size_t n) override {
         sql_.clear();
@@ -936,6 +936,29 @@ public:
 
     void SelfTest(ITestComparer *cmp) override {
         cmp->ExpectEq("select (select (select (select (select 1 as x))))", GenerateSQL(4));
+    }
+};
+
+class SubSelectInExpr : public ISQLFeature {
+public:
+    explicit SubSelectInExpr() {}
+
+    std::string name() override { return "subselect in expression"; }
+
+    std::string GenerateSQL(size_t n) override {
+        sql_.clear();
+        for (size_t i = 0; i < n; i++) {
+            sql_.append("select 1 + (");
+        }
+        sql_.append("select 1 as x");
+        for (size_t i = 0; i < n; i++) {
+            sql_.append(") t" + std::to_string(i));
+        }
+        return sql_;
+    }
+
+    void SelfTest(ITestComparer *cmp) override {
+        cmp->ExpectEq("select 1 + (select 1 + (select 1 as x) t0) t1", GenerateSQL(2));
     }
 };
 
@@ -1512,8 +1535,9 @@ std::vector<std::unique_ptr<ISQLFeature>> GetBuiltinFeatures() {
     features.emplace_back(std::make_unique<Greatest>());
     features.emplace_back(std::make_unique<SimpleCase>());
     features.emplace_back(std::make_unique<SearchedCase>());
-    features.emplace_back(std::make_unique<SubSelect>());
+    features.emplace_back(std::make_unique<SubSelectFrom>());
     features.emplace_back(std::make_unique<SubSelectScalar>());
+    features.emplace_back(std::make_unique<SubSelectInExpr>());
     features.emplace_back(std::make_unique<CTE>());
     features.emplace_back(std::make_unique<RecursiveCTE>());
     features.emplace_back(std::make_unique<GroupByList>());
