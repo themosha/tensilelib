@@ -127,7 +127,12 @@ public:
 
     std::vector<Result> Run();
 
-    Result Run(ISQLProvider *provider, ISQLFeature *feature);
+    std::vector<Result> Run(ISQLProvider *provider, ISQLFeature *feature);
+
+    // After finding the first-failure boundary, also continue doubling @n to
+    // surface deeper, distinct failures (e.g. a parser cap masking a planner
+    // bug at higher depth). Enabled by default.
+    void set_explore_beyond_first_failure(bool value) { explore_beyond_ = value; }
 
     // Accessors
     // =========
@@ -154,6 +159,7 @@ private:
     std::string provider_names_to_check_;
     std::string feature_names_to_check_;
     bool perftrace_ = false;
+    bool explore_beyond_ = true;
 
     // Checks if given feature succeeds or fails for the given provider.
     // This function can also detect crashes and execution longer than given timeout.

@@ -36,6 +36,7 @@ Driver::Driver(int argc, char **argv) {
 
     set_perftrace(cmdl["perftrace"]);
     set_check_crash(cmdl["check_crash"]);
+    if (cmdl["no_explore_beyond"]) set_explore_beyond_first_failure(false);
 
     int timeout_ms;
     cmdl("timeout", 100) >> timeout_ms;
@@ -66,14 +67,15 @@ std::vector<Result> Driver::Run() {
                     continue;
                 }
             }
-            Result result = Run(provider.get(), feature.get());
-            results.emplace_back(result);
+            for (auto &r : Run(provider.get(), feature.get())) {
+                results.emplace_back(std::move(r));
+            }
         }
     }
     return results;
 }
 
-Result Driver::Run(ISQLProvider *provider, ISQLFeature *feature) {
+std::vector<Result> Driver::Run(ISQLProvider *provider, ISQLFeature *feature) {
     if (!perftrace()) {
         std::cout << feature->name() << ":";
         std::flush(std::cout);
@@ -85,6 +87,7 @@ Result Driver::Run(ISQLProvider *provider, ISQLFeature *feature) {
     // TODO(moshap): Use Incrementer class to support different strategies.
     size_t n1 = 1;
     size_t n = n1;
+    size_t n_first_fail = std::numeric_limits<size_t>::max();
     if (feature->is_exponential()) {
         for (; n < std::numeric_limits<size_t>::max(); n++) {
             Status current_status = CheckFeature(n, feature, provider);
@@ -95,6 +98,7 @@ Result Driver::Run(ISQLProvider *provider, ISQLFeature *feature) {
             status.Update(current_status);
             if (status.code() != Status::SUCCESS) {
                 n1 = n;
+                n_first_fail = n;
                 break;
             }
         }
@@ -107,6 +111,7 @@ Result Driver::Run(ISQLProvider *provider, ISQLFeature *feature) {
             }
             status.Update(current_status);
             if (status.code() != Status::SUCCESS) {
+                n_first_fail = n;
                 break;
             }
             n1 = n;
@@ -140,6 +145,7 @@ Result Driver::Run(ISQLProvider *provider, ISQLFeature *feature) {
                     n2 = n;
                 }
             }
+            n_first_fail = n2;
         }
     }
     if (!perftrace()) {
@@ -147,12 +153,84 @@ Result Driver::Run(ISQLProvider *provider, ISQLFeature *feature) {
         std::flush(std::cout);
     }
 
-    Result result;
-    result.provider = provider->name();
-    result.feature = feature->name();
-    result.limit = n1;
-    result.status = status;
-    return result;
+    std::vector<Result> findings;
+    {
+        Result result;
+        result.provider = provider->name();
+        result.feature = feature->name();
+        result.limit = n1;
+        result.status = status;
+        findings.emplace_back(std::move(result));
+    }
+
+    // Exploration beyond the first-failure boundary. The first failure can mask
+    // deeper, distinct failures (e.g. a parser cap that hides a planner non-
+    // termination at much higher @n). Continue doubling @n past the first
+    // failure and record any *different* status code or message as additional
+    // findings. Stop after a small number of consecutive identical results, or
+    // when @n overflows.
+    auto error_kind = [](const Status &s) -> std::string {
+        // Normalize the message for "is this the same error?" — take only the
+        // first line (engines often embed huge query snippets after a newline)
+        // and cap length so digit-difference detail doesn't fool us.
+        const std::string &m = s.message();
+        size_t nl = m.find('\n');
+        std::string kind = (nl == std::string::npos) ? m : m.substr(0, nl);
+        if (kind.size() > 120) kind.resize(120);
+        return std::to_string(s.code()) + "/" + kind;
+    };
+    auto short_message = [](const Status &s) -> std::string {
+        const std::string &m = s.message();
+        size_t nl = m.find('\n');
+        std::string out = (nl == std::string::npos) ? m : m.substr(0, nl);
+        if (out.size() > 200) out.resize(200);
+        return out;
+    };
+    if (explore_beyond_ && status.code() != Status::SUCCESS &&
+        n_first_fail < std::numeric_limits<size_t>::max() / 2) {
+        if (!perftrace_) {
+            std::cout << "  (exploring beyond):";
+            std::flush(std::cout);
+        }
+        const int kMaxConsecutiveSame = 4;
+        const size_t kMaxDoublings = 30;  // ~1e9, well past any practical cap
+        std::string last_kind = error_kind(status);
+        int consecutive_same = 0;
+        size_t doublings = 0;
+        for (size_t n_next = n_first_fail; doublings < kMaxDoublings; ++doublings) {
+            if (n_next > std::numeric_limits<size_t>::max() / 2) break;
+            n_next *= 2;
+            Status s = CheckFeature(n_next, feature, provider);
+            if (!perftrace_) {
+                std::cout << s.ToChar();
+                std::flush(std::cout);
+            }
+            std::string kind = error_kind(s);
+            if (kind != last_kind) {
+                if (!perftrace_) {
+                    std::cout << " new at n=" << n_next
+                              << " status = " << code_to_text[s.code()] << ": " << short_message(s);
+                    std::flush(std::cout);
+                }
+                Result extra;
+                extra.provider = provider->name();
+                extra.feature = feature->name();
+                extra.limit = n_next;
+                extra.status = Status(s.code(), short_message(s));
+                findings.emplace_back(std::move(extra));
+                last_kind = kind;
+                consecutive_same = 0;
+            } else if (++consecutive_same >= kMaxConsecutiveSame) {
+                break;
+            }
+        }
+        if (!perftrace_) {
+            std::cout << std::endl;
+            std::flush(std::cout);
+        }
+    }
+
+    return findings;
 }
 
 Status Driver::CheckFeature(size_t n, ISQLFeature *feature, ISQLProvider *provider) {

@@ -265,6 +265,249 @@ public:
     }
 };
 
+class NestedStruct : public ISQLFeature {
+public:
+    std::string name() override { return "nested struct"; }
+
+    std::string GenerateSQL(size_t n) override {
+        sql_ = "select ";
+        for (size_t i = 0; i < n; i++)
+            sql_.append("{'x':");
+        sql_.append("1");
+        sql_.append(n, '}');
+        return sql_;
+    }
+
+    void SelfTest(ITestComparer *cmp) override {
+        cmp->ExpectEq("select {'x':1}", GenerateSQL(1));
+        cmp->ExpectEq("select {'x':{'x':{'x':{'x':{'x':1}}}}}", GenerateSQL(5));
+    }
+};
+
+class MixedStructArray : public ISQLFeature {
+public:
+    std::string name() override { return "mixed struct/array"; }
+
+    std::string GenerateSQL(size_t n) override {
+        sql_ = "select ";
+        for (size_t i = 0; i < n; i++) sql_.append((i % 2 == 0) ? "{'x':" : "[");
+        sql_.append("1");
+        for (size_t i = n; i-- > 0;) sql_.append((i % 2 == 0) ? "}" : "]");
+        return sql_;
+    }
+
+    void SelfTest(ITestComparer *cmp) override {
+        cmp->ExpectEq("select {'x':1}", GenerateSQL(1));
+        cmp->ExpectEq("select {'x':[{'x':[1]}]}", GenerateSQL(4));
+    }
+};
+
+class WideStruct : public ISQLFeature {
+public:
+    std::string name() override { return "wide struct"; }
+
+    std::string GenerateSQL(size_t n) override {
+        sql_ = "select {";
+        for (size_t i = 0; i < n; i++) {
+            if (i) sql_.append(",");
+            sql_.append("'f");
+            sql_.append(std::to_string(i));
+            sql_.append("':1");
+        }
+        sql_.append("}");
+        return sql_;
+    }
+
+    void SelfTest(ITestComparer *cmp) override {
+        cmp->ExpectEq("select {'f0':1}", GenerateSQL(1));
+        cmp->ExpectEq("select {'f0':1,'f1':1,'f2':1}", GenerateSQL(3));
+    }
+};
+
+class NestedJson : public ISQLFeature {
+public:
+    std::string name() override { return "nested JSON"; }
+
+    std::string GenerateSQL(size_t n) override {
+        sql_ = "select cast('";
+        for (size_t i = 0; i < n; i++)
+            sql_.append("{\"a\":");
+        sql_.append("1");
+        sql_.append(n, '}');
+        sql_.append("' as json)");
+        return sql_;
+    }
+
+    void SelfTest(ITestComparer *cmp) override {
+        cmp->ExpectEq("select cast('{\"a\":1}' as json)", GenerateSQL(1));
+        cmp->ExpectEq("select cast('{\"a\":{\"a\":{\"a\":1}}}' as json)", GenerateSQL(3));
+    }
+};
+
+class WideJson : public ISQLFeature {
+public:
+    std::string name() override { return "wide JSON"; }
+
+    std::string GenerateSQL(size_t n) override {
+        sql_ = "select cast('{";
+        for (size_t i = 0; i < n; i++) {
+            if (i) sql_.append(",");
+            sql_.append("\"f");
+            sql_.append(std::to_string(i));
+            sql_.append("\":1");
+        }
+        sql_.append("}' as json)");
+        return sql_;
+    }
+
+    void SelfTest(ITestComparer *cmp) override {
+        cmp->ExpectEq("select cast('{\"f0\":1}' as json)", GenerateSQL(1));
+        cmp->ExpectEq("select cast('{\"f0\":1,\"f1\":1,\"f2\":1}' as json)", GenerateSQL(3));
+    }
+};
+
+// Chained json_set: builds JSON with n keys via n nested function calls.
+// Output amplifier (small per-call cost, growing JSON output) — analogue of repeat.
+class JsonSetChain : public ISQLFeature {
+public:
+    std::string name() override { return "json_set chain"; }
+
+    std::string GenerateSQL(size_t n) override {
+        sql_ = "select ";
+        for (size_t i = 0; i < n; i++) sql_.append("json_set(");
+        sql_.append("cast('{}' as json)");
+        for (size_t i = 0; i < n; i++) {
+            sql_.append(", ['f");
+            sql_.append(std::to_string(i));
+            sql_.append("'], '1')");
+        }
+        return sql_;
+    }
+
+    void SelfTest(ITestComparer *cmp) override {
+        cmp->ExpectEq("select json_set(cast('{}' as json), ['f0'], '1')", GenerateSQL(1));
+        cmp->ExpectEq(
+                "select json_set(json_set(cast('{}' as json), ['f0'], '1'), ['f1'], '1')",
+                GenerateSQL(2));
+    }
+};
+
+// json_each over a JSON object with n keys: set-returning function producing
+// n output rows from a single input value — analogue of unnest.
+class JsonEach : public ISQLFeature {
+public:
+    std::string name() override { return "json_each"; }
+
+    std::string GenerateSQL(size_t n) override {
+        sql_ = "select * from json_each(cast('{";
+        for (size_t i = 0; i < n; i++) {
+            if (i) sql_.append(",");
+            sql_.append("\"f");
+            sql_.append(std::to_string(i));
+            sql_.append("\":1");
+        }
+        sql_.append("}' as json))");
+        return sql_;
+    }
+
+    void SelfTest(ITestComparer *cmp) override {
+        cmp->ExpectEq("select * from json_each(cast('{\"f0\":1}' as json))", GenerateSQL(1));
+        cmp->ExpectEq(
+                "select * from json_each(cast('{\"f0\":1,\"f1\":1}' as json))",
+                GenerateSQL(2));
+    }
+};
+
+// Dollar-quoted string literal: `$$ ... $$`. Probes lexer length cap on this
+// alternate string form (vs. single-quoted TextLiteral).
+class DollarString : public ISQLFeature {
+public:
+    std::string name() override { return "dollar-quoted string"; }
+
+    std::string GenerateSQL(size_t n) override {
+        sql_ = "select $$";
+        sql_.append(n, 'a');
+        sql_.append("$$");
+        return sql_;
+    }
+
+    void SelfTest(ITestComparer *cmp) override {
+        cmp->ExpectEq("select $$a$$", GenerateSQL(1));
+        cmp->ExpectEq("select $$aaaaa$$", GenerateSQL(5));
+    }
+};
+
+// BETWEEN ... AND chain. The non-parenthesized form `x BETWEEN a AND b BETWEEN
+// c AND d ...` is rejected universally (PostgreSQL / DuckDB / PackDB) as a
+// syntax error, so we parenthesize the prior expression on each step:
+// `(((x BETWEEN a AND b) BETWEEN c AND d) BETWEEN e AND f) ...`. This probes
+// how deep the parser/planner can chain boolean BETWEENs.
+class BetweenChain : public ISQLFeature {
+public:
+    std::string name() override { return "BETWEEN chain"; }
+
+    std::string GenerateSQL(size_t n) override {
+        sql_ = "1 between 0 and 2";
+        for (size_t i = 1; i < n; i++) {
+            sql_.insert(0, "(");
+            sql_.append(") between false and true");
+        }
+        sql_.insert(0, "select ");
+        return sql_;
+    }
+
+    void SelfTest(ITestComparer *cmp) override {
+        cmp->ExpectEq("select 1 between 0 and 2", GenerateSQL(1));
+        cmp->ExpectEq(
+                "select ((1 between 0 and 2) between false and true) between false and true",
+                GenerateSQL(3));
+    }
+};
+
+// generate_series: set-returning function producing N rows. Output-amplifier
+// analogue of unnest for synthetic ranges.
+class GenerateSeries : public ISQLFeature {
+public:
+    std::string name() override { return "generate_series"; }
+
+    std::string GenerateSQL(size_t n) override {
+        sql_ = "select generate_series(1, ";
+        sql_.append(std::to_string(n));
+        sql_.append(")");
+        return sql_;
+    }
+
+    void SelfTest(ITestComparer *cmp) override {
+        cmp->ExpectEq("select generate_series(1, 1)", GenerateSQL(1));
+        cmp->ExpectEq("select generate_series(1, 10000)", GenerateSQL(10000));
+    }
+};
+
+// Wide CREATE TABLE: how many columns can a table declaration carry.
+class WideCreateTable : public ISQLFeature {
+public:
+    std::string name() override { return "wide CREATE TABLE"; }
+
+    std::string GenerateSQL(size_t n) override {
+        sql_ = "create table if not exists tw_create_";
+        sql_.append(std::to_string(n));
+        sql_.append(" (c0 int");
+        for (size_t i = 1; i < n; i++) {
+            sql_.append(", c");
+            sql_.append(std::to_string(i));
+            sql_.append(" int");
+        }
+        sql_.append(")");
+        return sql_;
+    }
+
+    void SelfTest(ITestComparer *cmp) override {
+        cmp->ExpectEq("create table if not exists tw_create_1 (c0 int)", GenerateSQL(1));
+        cmp->ExpectEq("create table if not exists tw_create_3 (c0 int, c1 int, c2 int)",
+                      GenerateSQL(3));
+    }
+};
+
 class Tuple : public ISQLFeature {
 public:
     std::string name() override { return "tuple"; }
@@ -713,13 +956,13 @@ class AtTimeZone : public ISQLFeature {
     std::string GenerateSQL(size_t n) override {
         sql_ = "select timestamp '2000-01-01 00:00:00'";
         for (size_t i = 0; i < n; i++) {
-            sql_.append(" at time zone '+00'");
+            sql_.append(" at time zone 'UTC'");
         }
         return sql_;
     }
 
     void SelfTest(ITestComparer *cmp) override {
-        cmp->ExpectEq("select timestamp '2000-01-01 00:00:00' at time zone '+00' at time zone '+00'",
+        cmp->ExpectEq("select timestamp '2000-01-01 00:00:00' at time zone 'UTC' at time zone 'UTC'",
                       GenerateSQL(2));
     }
 };
@@ -1017,6 +1260,58 @@ public:
     }
 };
 
+class GroupingOpBase : public ISQLFeature {
+public:
+    explicit GroupingOpBase(std::string_view op) : op_(op) {}
+
+    std::string GenerateSQL(size_t n) override {
+        sql_ = "select x from (select 1 x) t group by ";
+        sql_.append(op_);
+        sql_.append(" ((x)");
+        for (size_t i = 1; i < n; i++) {
+            sql_.append(",(x+" + std::to_string(i) + ")");
+        }
+        sql_.append(")");
+        return sql_;
+    }
+
+protected:
+    const std::string op_;
+};
+
+class GroupingSets : public GroupingOpBase {
+public:
+    GroupingSets() : GroupingOpBase("grouping sets") {}
+    std::string name() override { return "GROUPING SETS"; }
+
+    void SelfTest(ITestComparer *cmp) override {
+        cmp->ExpectEq("select x from (select 1 x) t group by grouping sets ((x),(x+1),(x+2))",
+                GenerateSQL(3));
+    }
+};
+
+class Rollup : public GroupingOpBase {
+public:
+    Rollup() : GroupingOpBase("rollup") {}
+    std::string name() override { return "ROLLUP"; }
+
+    void SelfTest(ITestComparer *cmp) override {
+        cmp->ExpectEq("select x from (select 1 x) t group by rollup ((x),(x+1),(x+2))",
+                GenerateSQL(3));
+    }
+};
+
+class Cube : public GroupingOpBase {
+public:
+    Cube() : GroupingOpBase("cube") {}
+    std::string name() override { return "CUBE"; }
+
+    void SelfTest(ITestComparer *cmp) override {
+        cmp->ExpectEq("select x from (select 1 x) t group by cube ((x),(x+1),(x+2))",
+                GenerateSQL(3));
+    }
+};
+
 class OrderByList : public ISQLFeature {
 public:
     std::string name() override { return "ORDER BY list"; }
@@ -1103,6 +1398,17 @@ public:
         cmp->ExpectEq(
                 "select 1 x except select 1 x",
                 GenerateSQL(1));
+    }
+};
+
+class Intersect : public RelOperator {
+public:
+    Intersect() : RelOperator("intersect") {}
+
+    void SelfTest(ITestComparer *cmp) override {
+        cmp->ExpectEq(
+                "select 1 x intersect select 1 x intersect select 1 x",
+                GenerateSQL(2));
     }
 };
 
@@ -1490,6 +1796,17 @@ std::vector<std::unique_ptr<ISQLFeature>> GetBuiltinFeatures() {
     features.emplace_back(std::make_unique<PastTimestampLiteral>());
     features.emplace_back(std::make_unique<Array>());
     features.emplace_back(std::make_unique<NestedArray>());
+    features.emplace_back(std::make_unique<NestedStruct>());
+    features.emplace_back(std::make_unique<MixedStructArray>());
+    features.emplace_back(std::make_unique<WideStruct>());
+    features.emplace_back(std::make_unique<NestedJson>());
+    features.emplace_back(std::make_unique<WideJson>());
+    features.emplace_back(std::make_unique<JsonSetChain>());
+    features.emplace_back(std::make_unique<JsonEach>());
+    features.emplace_back(std::make_unique<DollarString>());
+    features.emplace_back(std::make_unique<BetweenChain>());
+    features.emplace_back(std::make_unique<GenerateSeries>());
+    features.emplace_back(std::make_unique<WideCreateTable>());
     features.emplace_back(std::make_unique<Tuple>());
     features.emplace_back(std::make_unique<NestedTuple>());
     features.emplace_back(std::make_unique<SelectList>());
@@ -1541,11 +1858,15 @@ std::vector<std::unique_ptr<ISQLFeature>> GetBuiltinFeatures() {
     features.emplace_back(std::make_unique<CTE>());
     features.emplace_back(std::make_unique<RecursiveCTE>());
     features.emplace_back(std::make_unique<GroupByList>());
+    features.emplace_back(std::make_unique<GroupingSets>());
+    features.emplace_back(std::make_unique<Rollup>());
+    features.emplace_back(std::make_unique<Cube>());
     features.emplace_back(std::make_unique<OrderByList>());
     features.emplace_back(std::make_unique<Aggregation>());
     features.emplace_back(std::make_unique<UnionAll>());
     features.emplace_back(std::make_unique<Union>());
     features.emplace_back(std::make_unique<Except>());
+    features.emplace_back(std::make_unique<Intersect>());
     features.emplace_back(std::make_unique<CrossJoin>());
     features.emplace_back(std::make_unique<NaturalJoin>());
     features.emplace_back(std::make_unique<JoinChain>());
