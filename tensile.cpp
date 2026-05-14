@@ -1,13 +1,24 @@
 #include "tensile.h"
 
 #include "argh/argh.h"
+#include <atomic>
 #include <iostream>
+#include <memory>
 #include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
 #include <signal.h>
 
 namespace tensile {
+
+namespace {
+// Hard caps to keep the suite from hanging or OOM-ing on synthetic queries
+// whose generated SQL would be enormous. These mostly matter for the
+// explore-beyond-first-failure mode under slow runtimes (e.g. sanitizers),
+// where doubling @n past a small first-failure can reach 1e9+.
+constexpr size_t kMaxN = 10'000'000;
+constexpr size_t kMaxSqlBytes = 16ull * 1024 * 1024;  // 16 MiB
+}  // namespace
 
 const Status::Code Status::SUCCESS;
 const Status::Code Status::ERROR;
@@ -234,15 +245,68 @@ std::vector<Result> Driver::Run(ISQLProvider *provider, ISQLFeature *feature) {
 }
 
 Status Driver::CheckFeature(size_t n, ISQLFeature *feature, ISQLProvider *provider) {
-    // Fork the main execution, and then fork into two processes:
-    // * checker - the one which actually checks SQL against provider
-    // * timeout - the one which waits specified timeout and kills checkers
-    //             process if it exceeded the timeout.
+    // Skip queries that would be absurdly large. Both SQL generation and
+    // execution become prohibitively slow under sanitizers for n in the
+    // billions, and can OOM the process before any timeout fires.
+    if (n > kMaxN) {
+        return Status(Status::TIMEOUT, "n exceeds safety cap");
+    }
     std::string sql = feature->GenerateSQL(n);
+    if (sql.size() > kMaxSqlBytes) {
+        return Status(Status::TIMEOUT, "sql size exceeds safety cap");
+    }
+
+    // In-process path: enforce timeout_ via a worker thread + wait_for.
+    // If the worker hangs we detach it and report TIMEOUT — this leaks the
+    // thread, but is preferable to hanging the whole suite. Without this,
+    // timeout_ was only checked retrospectively and never actually bounded
+    // execution.
+    if (!check_crash_) {
+        struct RunState {
+            std::atomic<bool> done{false};
+            bool ok = false;
+            std::string error_msg;
+        };
+        auto state = std::make_shared<RunState>();
+        std::string sql_copy = sql;  // captured by value into worker
+        auto start = std::chrono::high_resolution_clock::now();
+        std::thread([state, sql_copy = std::move(sql_copy), provider]() {
+            try {
+                state->ok = provider->Run(sql_copy, &state->error_msg);
+            } catch (...) {
+                state->ok = false;
+                state->error_msg = "unknown exception";
+            }
+            state->done.store(true, std::memory_order_release);
+        }).detach();
+
+        auto deadline = std::chrono::steady_clock::now() + timeout_;
+        while (!state->done.load(std::memory_order_acquire)) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                return Status(Status::TIMEOUT);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        auto finish = std::chrono::high_resolution_clock::now();
+        if (perftrace_) {
+            std::cout << provider->name() << "," << feature->name() << "," << n << ","
+                      << std::chrono::duration_cast<std::chrono::milliseconds>(finish - start).count() << ","
+                      << (state->ok ? "OK" : "ERROR")
+                      << std::endl;
+        }
+        if (state->ok) {
+            return Status(Status::SUCCESS);
+        }
+        return Status(Status::ERROR, state->error_msg);
+    }
+
+    // Fork-based isolation: fork into checker + timeout-watcher children.
+    // The checker actually runs the SQL; the timeout-watcher kills the
+    // checker if it exceeds timeout_.
     std::string error_msg;
-    pid_t pid = check_crash_ ? fork() : 0;
+    pid_t pid = fork();
     if (pid == 0) {
-        pid_t checker_pid = check_crash_ ? fork() : 0;
+        pid_t checker_pid = fork();
         if (checker_pid == 0) {
             // Silence stderr, since some code writes there in case of errors.
             // TODO(moshap): Ideally we should detect whether provider code wrote to stderr and report it as a problem,
@@ -260,22 +324,16 @@ Status Driver::CheckFeature(size_t n, ISQLFeature *feature, ISQLProvider *provid
                           << (ok ? "OK" : "ERROR")
                           << std::endl;
             }
-            if (!check_crash_) {
-                if (!ok) {
-                    return Status(Status::ERROR, error_msg);
-                }
-                if (finish - start > timeout_) {
-                    return Status(Status::TIMEOUT);
-                }
-                return Status(Status::SUCCESS);
-            }
-            exit(ok ? Status::SUCCESS : Status::ERROR);
+            // Use _exit so we don't run static/global destructors inherited
+            // from the parent — those could e.g. send SIGTERM to the shared
+            // firebolt-core process when FireboltCoreWrapper goes out of scope.
+            _exit(ok ? Status::SUCCESS : Status::ERROR);
         }
 
         pid_t timeout_pid = fork();
         if (timeout_pid == 0) {
             std::this_thread::sleep_for(timeout_);
-            exit(0);
+            _exit(0);
         }
 
         Status status;
@@ -298,7 +356,7 @@ Status Driver::CheckFeature(size_t n, ISQLFeature *feature, ISQLProvider *provid
         }
         // Wait for the other (killed) process to finish
         wait(nullptr);
-        exit(status.code());
+        _exit(status.code());
     }
     // Wait for the intermediary process to finish and propagate its exit code
     int exit_code;
