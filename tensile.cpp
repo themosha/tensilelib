@@ -1,9 +1,7 @@
 #include "tensile.h"
 
 #include "argh/argh.h"
-#include <atomic>
 #include <iostream>
-#include <memory>
 #include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
@@ -256,48 +254,38 @@ Status Driver::CheckFeature(size_t n, ISQLFeature *feature, ISQLProvider *provid
         return Status(Status::TIMEOUT, "sql size exceeds safety cap");
     }
 
-    // In-process path: enforce timeout_ via a worker thread + wait_for.
-    // If the worker hangs we detach it and report TIMEOUT — this leaks the
-    // thread, but is preferable to hanging the whole suite. Without this,
-    // timeout_ was only checked retrospectively and never actually bounded
-    // execution.
+    // In-process path: run the provider inline and measure elapsed time.
+    // We do NOT enforce the timeout by killing or detaching a worker —
+    // earlier versions spawned a std::thread and detached on timeout, but
+    // that leaked threads which kept running runaway queries in the
+    // background, starving subsequent queries and causing them to time
+    // out at n=1. Runaway queries are bounded instead by the safety caps
+    // (kMaxN / kMaxSqlBytes) applied above before the provider is
+    // invoked, so this code can safely block on provider->Run.
     if (!check_crash_) {
-        struct RunState {
-            std::atomic<bool> done{false};
-            bool ok = false;
-            std::string error_msg;
-        };
-        auto state = std::make_shared<RunState>();
-        std::string sql_copy = sql;  // captured by value into worker
+        std::string error_msg;
         auto start = std::chrono::high_resolution_clock::now();
-        std::thread([state, sql_copy = std::move(sql_copy), provider]() {
-            try {
-                state->ok = provider->Run(sql_copy, &state->error_msg);
-            } catch (...) {
-                state->ok = false;
-                state->error_msg = "unknown exception";
-            }
-            state->done.store(true, std::memory_order_release);
-        }).detach();
-
-        auto deadline = std::chrono::steady_clock::now() + timeout_;
-        while (!state->done.load(std::memory_order_acquire)) {
-            if (std::chrono::steady_clock::now() >= deadline) {
-                return Status(Status::TIMEOUT);
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        bool ok;
+        try {
+            ok = provider->Run(sql, &error_msg);
+        } catch (...) {
+            ok = false;
+            error_msg = "unknown exception";
         }
         auto finish = std::chrono::high_resolution_clock::now();
         if (perftrace_) {
             std::cout << provider->name() << "," << feature->name() << "," << n << ","
                       << std::chrono::duration_cast<std::chrono::milliseconds>(finish - start).count() << ","
-                      << (state->ok ? "OK" : "ERROR")
+                      << (ok ? "OK" : "ERROR")
                       << std::endl;
         }
-        if (state->ok) {
-            return Status(Status::SUCCESS);
+        if (!ok) {
+            return Status(Status::ERROR, error_msg);
         }
-        return Status(Status::ERROR, state->error_msg);
+        if (finish - start > timeout_) {
+            return Status(Status::TIMEOUT);
+        }
+        return Status(Status::SUCCESS);
     }
 
     // Fork-based isolation: fork into checker + timeout-watcher children.
