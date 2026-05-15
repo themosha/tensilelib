@@ -34,6 +34,33 @@ public:
         // Do nothing
     }
 
+    // Optional validation: checks whether the SQL generated for @n makes syntactic sense.
+    // Returns true if valid. The default implementation does a light check (balanced parens,
+    // known-starts-with). Features with complex output SHOULD override this with a proper
+    // parse if they have a parser available; the base-class check alone is not a substitute.
+    virtual bool ValidateSQL(size_t n, std::string *reason) {
+        auto sql = GenerateSQL(n);
+        unsigned balance = 0;
+        for (char c : sql) {
+            if (c == '(') ++balance;
+            else if (c == ')') {
+                if (balance == 0) { *reason = "unmatched ')'"; return false; }
+                --balance;
+            }
+        }
+        if (balance != 0) { *reason = "unmatched '('"; return false; }
+        // Extract the first keyword (up to first whitespace or end-of-string)
+        auto first_space = sql.find_first_of(" \t\n\r");
+        auto first_word = (first_space == std::string::npos) ? sql : sql.substr(0, first_space);
+        if (first_word != "select" && first_word != "SELECT" &&
+            first_word != "with"  && first_word != "WITH"  &&
+            first_word != "create" && first_word != "CREATE") {
+            *reason = "stmt must start with SELECT, WITH, or CREATE";
+            return false;
+        }
+        return true;
+    }
+
     virtual bool is_exponential() const { return false; }
 
 protected:

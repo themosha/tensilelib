@@ -17,6 +17,10 @@ TEST(Features, All) {
     for (auto& feature : features) {
         SCOPED_TRACE(feature->name());
         feature->SelfTest(&cmp);
+        // Validate generated SQL at n=1 and n=2 for syntactic sanity
+        std::string reason;
+        EXPECT_TRUE(feature->ValidateSQL(1, &reason)) << feature->name() << " n=1: " << reason;
+        EXPECT_TRUE(feature->ValidateSQL(2, &reason)) << feature->name() << " n=2: " << reason;
     }
 }
 
@@ -89,6 +93,30 @@ TEST(SetOp, CorrelatedSubqueryGenerateSQL) {
         }
     }
     FAIL() << "correlated subquery feature not found";
+}
+
+TEST(WindowTest, NamedWindowGenerateSQL) {
+    auto features = GetBuiltinFeatures();
+    for (auto& feature : features) {
+        if (feature->name() == "named window") {
+            // Validate SQL at multiple depths — would have caught w0 as ()
+            EXPECT_EQ(
+                "select row_number() over w1 window w0 as (order by 1) ,w1 as (order by 1)",
+                feature->GenerateSQL(1));
+            EXPECT_EQ(
+                "select row_number() over w2 window w0 as (order by 1) ,w1 as (order by 1) ,w2 as (order by 1)",
+                feature->GenerateSQL(2));
+            EXPECT_EQ(
+                "select row_number() over w3 window w0 as (order by 1) ,w1 as (order by 1) ,w2 as (order by 1) ,w3 as (order by 1)",
+                feature->GenerateSQL(3));
+            // ValidateSQL catches syntactic errors
+            std::string reason;
+            EXPECT_TRUE(feature->ValidateSQL(1, &reason)) << reason;
+            EXPECT_TRUE(feature->ValidateSQL(10, &reason)) << reason;
+            return;
+        }
+    }
+    FAIL() << "named window feature not found";
 }
 
 TEST(SetOp, IsDistinctFromGenerateSQL) {

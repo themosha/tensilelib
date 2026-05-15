@@ -1830,16 +1830,16 @@ public:
     std::string name() override { return "named window"; }
 
     std::string GenerateSQL(size_t n) override {
-        sql_ = "select row_number() over w" + std::to_string(n) + " window w0 as ()";
+        sql_ = "select row_number() over w" + std::to_string(n) + " window w0 as (order by 1)";
         for (size_t i = 1; i <= n; i++) {
-            sql_.append(" ,w" + std::to_string(i) + " as (w" + std::to_string(i - 1) + ")");
+            sql_.append(" ,w" + std::to_string(i) + " as (order by 1)");
         }
         return sql_;
     }
 
     void SelfTest(ITestComparer *cmp) override {
         cmp->ExpectEq(
-                "select row_number() over w2 window w0 as () ,w1 as (w0) ,w2 as (w1)",
+                "select row_number() over w2 window w0 as (order by 1) ,w1 as (order by 1) ,w2 as (order by 1)",
                 GenerateSQL(2));
     }
 };
