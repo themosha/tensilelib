@@ -96,27 +96,30 @@ TEST(Driver, Error) {
     Driver d;
     TestFeature f;
     ErrorProvider e(100);
-    Result r = d.Run(&e, &f);
-    EXPECT_EQ(Status::ERROR, r.status.code());
-    EXPECT_EQ(100, r.limit);
+    auto results = d.Run(&e, &f);
+    ASSERT_EQ(1, results.size());
+    EXPECT_EQ(Status::ERROR, results[0].status.code());
+    EXPECT_EQ(100, results[0].limit);
 }
 
 TEST(Driver, Timeout) {
     Driver d;
     TestFeature f;
     TimeoutProvider e(9);
-    Result r = d.Run(&e, &f);
-    EXPECT_EQ(Status::TIMEOUT, r.status.code());
-    EXPECT_EQ(9, r.limit);
+    auto results = d.Run(&e, &f);
+    ASSERT_EQ(1, results.size());
+    EXPECT_EQ(Status::TIMEOUT, results[0].status.code());
+    EXPECT_EQ(9, results[0].limit);
 }
 
 TEST(Driver, Crash) {
     Driver d;
     TestFeature f;
     CrashProvider e(42);
-    Result r = d.Run(&e, &f);
-    EXPECT_EQ(Status::CRASH, r.status.code());
-    EXPECT_EQ(42, r.limit);
+    auto results = d.Run(&e, &f);
+    ASSERT_EQ(1, results.size());
+    EXPECT_EQ(Status::CRASH, results[0].status.code());
+    EXPECT_EQ(42, results[0].limit);
 }
 
 }  // namespace
