@@ -1,2 +1,0 @@
-/usr/bin/ar qc libtensilelib.a CMakeFiles/tensilelib.dir/features.cpp.o CMakeFiles/tensilelib.dir/tensile.cpp.o
-/usr/bin/ranlib libtensilelib.a
