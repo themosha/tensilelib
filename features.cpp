@@ -1407,8 +1407,76 @@ public:
 
     void SelfTest(ITestComparer *cmp) override {
         cmp->ExpectEq(
-                "select 1 x intersect select 1 x intersect select 1 x",
+                "select 1 x intersect select 1 x",
+                GenerateSQL(1));
+    }
+};
+
+class IntersectAll : public RelOperator {
+public:
+    IntersectAll() : RelOperator("intersect all") {}
+
+    void SelfTest(ITestComparer *cmp) override {
+        cmp->ExpectEq(
+                "select 1 x intersect all select 1 x",
+                GenerateSQL(1));
+    }
+};
+
+class CorrelatedSubquery : public ISQLFeature {
+public:
+    std::string name() override { return "correlated subquery"; }
+
+    std::string GenerateSQL(size_t n) override {
+        sql_ = "select * from (select 1 x) t0 where exists (";
+        for (size_t i = 1; i <= n; i++) {
+            if (i > 1) sql_ += "exists (";
+            sql_ += "select 1 from (select 1 x) t" + std::to_string(i) + " where ";
+            sql_ += "t" + std::to_string(i - 1) + ".x = t" + std::to_string(i) + ".x";
+            if (i < n) sql_ += " and ";
+        }
+        sql_ += std::string(n, ')');
+        return sql_;
+    }
+
+    void SelfTest(ITestComparer *cmp) override {
+        cmp->ExpectEq(
+                "select * from (select 1 x) t0 where exists ("
+                "select 1 from (select 1 x) t1 where t0.x = t1.x)",
+                GenerateSQL(1));
+        cmp->ExpectEq(
+                "select * from (select 1 x) t0 where exists ("
+                "select 1 from (select 1 x) t1 where t0.x = t1.x and "
+                "exists (select 1 from (select 1 x) t2 where t1.x = t2.x))",
                 GenerateSQL(2));
+    }
+};
+
+class IsDistinctFrom : public ISQLFeature {
+public:
+    std::string name() override { return "is distinct from"; }
+
+    std::string GenerateSQL(size_t n) override {
+        sql_ = "select ";
+        if (n > 1) {
+            for (size_t i = 0; i < n - 1; i++) {
+                sql_ += "(";
+            }
+            sql_ += "true";
+            for (size_t i = 2; i <= n; i++) {
+                sql_ += " is distinct from true)";
+            }
+            sql_ += " is distinct from false";
+        } else {
+            sql_ += "true is distinct from false";
+        }
+        return sql_;
+    }
+
+    void SelfTest(ITestComparer *cmp) override {
+        cmp->ExpectEq("select true is distinct from false", GenerateSQL(1));
+        cmp->ExpectEq("select (true is distinct from true) is distinct from false", GenerateSQL(2));
+        cmp->ExpectEq("select ((true is distinct from true) is distinct from true) is distinct from false", GenerateSQL(3));
     }
 };
 
@@ -1776,6 +1844,17 @@ public:
     }
 };
 
+class ExceptAll : public RelOperator {
+public:
+    ExceptAll() : RelOperator("except all") {}
+
+    void SelfTest(ITestComparer *cmp) override {
+        cmp->ExpectEq(
+                "select 1 x except all select 1 x",
+                GenerateSQL(1));
+    }
+};
+
 std::vector<std::unique_ptr<ISQLFeature>> GetBuiltinFeatures() {
     std::vector<std::unique_ptr<ISQLFeature>> features;
     features.emplace_back(std::make_unique<Comment>());
@@ -1867,6 +1946,10 @@ std::vector<std::unique_ptr<ISQLFeature>> GetBuiltinFeatures() {
     features.emplace_back(std::make_unique<Union>());
     features.emplace_back(std::make_unique<Except>());
     features.emplace_back(std::make_unique<Intersect>());
+    features.emplace_back(std::make_unique<IntersectAll>());
+    features.emplace_back(std::make_unique<ExceptAll>());
+    features.emplace_back(std::make_unique<CorrelatedSubquery>());
+    features.emplace_back(std::make_unique<IsDistinctFrom>());
     features.emplace_back(std::make_unique<CrossJoin>());
     features.emplace_back(std::make_unique<NaturalJoin>());
     features.emplace_back(std::make_unique<JoinChain>());
