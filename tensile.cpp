@@ -292,8 +292,17 @@ Status Driver::CheckFeature(size_t n, ISQLFeature *feature, ISQLProvider *provid
     // The checker actually runs the SQL; the timeout-watcher kills the
     // checker if it exceeds timeout_.
     std::string error_msg;
+    // Get the failure message from the checker via this pipe instead of
+    // re-running the SQL here: a re-run in this long-lived parent isn't
+    // crash-isolated and can take down the whole process.
+    constexpr size_t kMaxErrorMsgBytes = 4096;
+    int msg_pipe[2];
+    if (pipe(msg_pipe) != 0) {
+        msg_pipe[0] = msg_pipe[1] = -1;
+    }
     pid_t pid = fork();
     if (pid == 0) {
+        if (msg_pipe[0] >= 0) close(msg_pipe[0]);  // no one below this point reads
         pid_t checker_pid = fork();
         if (checker_pid == 0) {
             // Silence stderr, since some code writes there in case of errors.
@@ -312,6 +321,19 @@ Status Driver::CheckFeature(size_t n, ISQLFeature *feature, ISQLProvider *provid
                           << (ok ? "OK" : "ERROR")
                           << std::endl;
             }
+            // Send the failure message to the parent (bounded so the write can
+            // never exceed the pipe buffer and block).
+            if (!ok && msg_pipe[1] >= 0) {
+                const size_t len =
+                    error_msg.size() < kMaxErrorMsgBytes ? error_msg.size() : kMaxErrorMsgBytes;
+                size_t off = 0;
+                while (off < len) {
+                    ssize_t w = write(msg_pipe[1], error_msg.data() + off, len - off);
+                    if (w <= 0) break;
+                    off += static_cast<size_t>(w);
+                }
+            }
+            if (msg_pipe[1] >= 0) close(msg_pipe[1]);
             // Use _exit so we don't run static/global destructors inherited
             // from the parent — those could e.g. send SIGTERM to the shared
             // firebolt-core process when FireboltCoreWrapper goes out of scope.
@@ -320,9 +342,13 @@ Status Driver::CheckFeature(size_t n, ISQLFeature *feature, ISQLProvider *provid
 
         pid_t timeout_pid = fork();
         if (timeout_pid == 0) {
+            if (msg_pipe[1] >= 0) close(msg_pipe[1]);  // timeout-watcher never writes
             std::this_thread::sleep_for(timeout_);
             _exit(0);
         }
+        // Only the checker holds the write-end, so the parent's read sees EOF
+        // once the checker exits.
+        if (msg_pipe[1] >= 0) close(msg_pipe[1]);
 
         Status status;
         int exit_code;
@@ -346,18 +372,21 @@ Status Driver::CheckFeature(size_t n, ISQLFeature *feature, ISQLProvider *provid
         wait(nullptr);
         _exit(status.code());
     }
+    if (msg_pipe[1] >= 0) close(msg_pipe[1]);  // parent never writes
     // Wait for the intermediary process to finish and propagate its exit code
     int exit_code;
     waitpid(pid, &exit_code, 0);
-    if (WIFEXITED(exit_code)) {
-        Status::Code code = WEXITSTATUS(exit_code);
-        if (code == Status::ERROR) {
-            // Rerun to get error message
-            provider->Run(sql, &error_msg);
+    Status::Code code = WIFEXITED(exit_code) ? Status::Code(WEXITSTATUS(exit_code)) : Status::CRASH;
+    if (code == Status::ERROR && msg_pipe[0] >= 0) {
+        // All write-ends are closed by now, so this drains the message and hits EOF.
+        char buf[1024];
+        ssize_t r;
+        while ((r = read(msg_pipe[0], buf, sizeof(buf))) > 0) {
+            error_msg.append(buf, static_cast<size_t>(r));
         }
-        return Status(code, error_msg);
     }
-    return Status(Status::CRASH);
+    if (msg_pipe[0] >= 0) close(msg_pipe[0]);
+    return Status(code, error_msg);
 }
 
 }  // namespace tensile
