@@ -1855,6 +1855,21 @@ public:
     }
 };
 
+// Tests the limit of format() output size.
+class FormatOutputSize : public ISQLFeature {
+public:
+    std::string name() override { return "format output size"; }
+
+    std::string GenerateSQL(size_t n) override {
+        const std::string w = std::to_string(n * 1048576);  // n MiB per specifier
+        return "select length(format('%" + w + "s%" + w + "s', 'x', 'x'))";
+    }
+
+    void SelfTest(ITestComparer *cmp) override {
+        cmp->ExpectEq("select length(format('%1048576s%1048576s', 'x', 'x'))", GenerateSQL(1));
+    }
+};
+
 std::vector<std::unique_ptr<ISQLFeature>> GetBuiltinFeatures() {
     std::vector<std::unique_ptr<ISQLFeature>> features;
     features.emplace_back(std::make_unique<Comment>());
@@ -1968,6 +1983,7 @@ std::vector<std::unique_ptr<ISQLFeature>> GetBuiltinFeatures() {
     features.emplace_back(std::make_unique<UnnestList>());
     features.emplace_back(std::make_unique<Windows>());
     features.emplace_back(std::make_unique<NamedWindow>());
+    features.emplace_back(std::make_unique<FormatOutputSize>());
 
     return features;
 }
