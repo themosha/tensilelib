@@ -1711,6 +1711,29 @@ private:
     std::string type_;
 };
 
+// Nested IN lists: how deep `x in (x in (...))` can go. The "in semijoin" feature below
+// nests IN over *subqueries*, which recurses through the query parser; this nests IN over
+// expression lists, which recurses through the expression parser and hits a different limit.
+class NestedInList : public ISQLFeature {
+public:
+    std::string name() override { return "nested IN list"; }
+
+    std::string GenerateSQL(size_t n) override {
+        sql_ = "1";
+        for (size_t i = 0; i < n; i++) {
+            sql_.insert(0, "x in (");
+            sql_.append(")");
+        }
+        sql_.insert(0, "select ");
+        return sql_;
+    }
+
+    void SelfTest(ITestComparer *cmp) override {
+        cmp->ExpectEq("select x in (1)", GenerateSQL(1));
+        cmp->ExpectEq("select x in (x in (x in (1)))", GenerateSQL(3));
+    }
+};
+
 class InSemiJoin : public WhereSemiJoin {
 public:
     InSemiJoin() : WhereSemiJoin("x in") {}
@@ -1976,6 +1999,7 @@ std::vector<std::unique_ptr<ISQLFeature>> GetBuiltinFeatures() {
     features.emplace_back(std::make_unique<FullOuterJoin>());
     features.emplace_back(std::make_unique<LateralJoin>());
     features.emplace_back(std::make_unique<InSemiJoin>());
+    features.emplace_back(std::make_unique<NestedInList>());
     features.emplace_back(std::make_unique<ExistsSemiJoin>());
     features.emplace_back(std::make_unique<AnySemiJoin>());
     features.emplace_back(std::make_unique<AllSemiJoin>());
