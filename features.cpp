@@ -702,6 +702,16 @@ public:
     }
 };
 
+// MySQL, Spark and Databricks integer division.
+class IntegerDivide : public BinaryOperator {
+public:
+    IntegerDivide() : BinaryOperator("DIV", "1") {}
+
+    void SelfTest(ITestComparer *cmp) override {
+        cmp->ExpectEq("select 1 DIV 1 DIV 1", GenerateSQL(2));
+    }
+};
+
 class Modulo : public BinaryOperator {
 public:
     Modulo() : BinaryOperator("%", "1") {}
@@ -1939,6 +1949,7 @@ std::vector<std::unique_ptr<ISQLFeature>> GetBuiltinFeatures() {
     features.emplace_back(std::make_unique<Multiply>());
     features.emplace_back(std::make_unique<Divide>());
     features.emplace_back(std::make_unique<Modulo>());
+    features.emplace_back(std::make_unique<IntegerDivide>());
     features.emplace_back(std::make_unique<Power>());
     features.emplace_back(std::make_unique<LogicalAnd>());
     features.emplace_back(std::make_unique<LogicalOr>());
